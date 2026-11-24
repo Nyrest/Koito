@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,27 @@ import (
 	"github.com/gabehf/koito/internal/utils"
 	"github.com/google/uuid"
 )
+
+type listenBrainzExportTimestamp int64
+
+func (t *listenBrainzExportTimestamp) UnmarshalJSON(data []byte) error {
+	value := string(data)
+	if value == "null" {
+		return nil
+	}
+
+	// Some exports write integer Unix seconds with a decimal suffix, such as 1749780612.0.
+	whole, fraction, hasFraction := strings.Cut(value, ".")
+	if hasFraction && strings.Trim(fraction, "0") == "" {
+		value = whole
+	}
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid listened_at: %w", err)
+	}
+	*t = listenBrainzExportTimestamp(seconds)
+	return nil
+}
 
 func ImportListenBrainzExport(ctx context.Context, store importStore, mbzc mbz.MusicBrainzCaller, filename string) error {
 	l := logger.FromContext(ctx)
@@ -70,14 +92,16 @@ func ImportListenBrainzFile(ctx context.Context, store importStore, mbzc mbz.Mus
 	}
 	count := 0
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		payload := new(handlers.LbzSubmitListenPayload)
-		err := json.Unmarshal(line, payload)
+		var payload struct {
+			ListenedAt listenBrainzExportTimestamp `json:"listened_at"`
+			TrackMeta  handlers.LbzTrackMeta       `json:"track_metadata"`
+		}
+		err := json.Unmarshal(scanner.Bytes(), &payload)
 		if err != nil {
 			l.Err(err).Msg("Error unmarshaling JSON")
 			continue
 		}
-		ts := time.Unix(payload.ListenedAt, 0)
+		ts := time.Unix(int64(payload.ListenedAt), 0)
 		if !inImportTimeWindow(ts) {
 			l.Debug().Msgf("Skipping import due to import time rules")
 			continue
@@ -88,7 +112,7 @@ func ImportListenBrainzFile(ctx context.Context, store importStore, mbzc mbz.Mus
 		}
 		if len(artistMbzIDs) < 1 {
 			l.Debug().AnErr("error", err).Msg("ImportListenBrainzFile: Attempting to parse artist UUIDs from mbid_mapping")
-			utils.ParseUUIDSlice(payload.TrackMeta.MBIDMapping.ArtistMBIDs)
+			artistMbzIDs, err = utils.ParseUUIDSlice(payload.TrackMeta.MBIDMapping.ArtistMBIDs)
 			if err != nil {
 				l.Debug().AnErr("error", err).Msg("ImportListenBrainzFile: Failed to parse one or more UUIDs")
 			}
@@ -138,9 +162,14 @@ func ImportListenBrainzFile(ctx context.Context, store importStore, mbzc mbz.Mus
 			artistMbidMap = append(artistMbidMap, catalog.ArtistMbidMap{Artist: a.ArtistName, Mbid: mbid})
 		}
 
+		artistNames := payload.TrackMeta.AdditionalInfo.ArtistNames
+		if len(artistNames) < 1 {
+			artistNames = catalog.InferArtistNamesFromSourceIDs(payload.TrackMeta.ArtistName, payload.TrackMeta.AdditionalInfo.SpotifyArtistIDs)
+		}
+
 		opts := catalog.SubmitListenOpts{
 			MbzCaller:          mbzc,
-			ArtistNames:        payload.TrackMeta.AdditionalInfo.ArtistNames,
+			ArtistNames:        artistNames,
 			Artist:             payload.TrackMeta.ArtistName,
 			ArtistMbzIDs:       artistMbzIDs,
 			TrackTitle:         payload.TrackMeta.TrackName,

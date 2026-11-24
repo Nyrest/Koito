@@ -5,12 +5,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gabehf/koito/engine"
 	"github.com/gabehf/koito/internal/cfg"
 	"github.com/gabehf/koito/internal/db"
+	"github.com/gabehf/koito/internal/importer"
 	"github.com/gabehf/koito/internal/logger"
 	"github.com/gabehf/koito/internal/mbz"
 	"github.com/gabehf/koito/internal/utils"
@@ -226,6 +228,24 @@ func TestImportListenBrainz_MbzDisabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, listens.Items, 1)
 	assert.WithinDuration(t, time.Unix(1749780612, 0), listens.Items[0].Time, 1*time.Second)
+}
+
+func TestImportListenBrainz_Timestamps(t *testing.T) {
+	store := newTestDB()
+	ctx := logger.NewContext(logger.Get())
+	defer store.Close(ctx)
+	const input = `{"listened_at":1749780612,"track_metadata":{"track_name":"Timestamp Test","artist_name":"Test Artist"}}
+{"listened_at":1749780613.0,"track_metadata":{"track_name":"Timestamp Test","artist_name":"Test Artist"}}
+{"listened_at":1749780614.5,"track_metadata":{"track_name":"Timestamp Test","artist_name":"Test Artist"}}`
+
+	require.NoError(t, importer.ImportListenBrainzFile(ctx, store, &mbz.MbzErrorCaller{}, strings.NewReader(input), "timestamps.jsonl"))
+	listens, err := store.GetListensPaginated(ctx, db.GetItemsOpts{Page: 1, Timeframe: db.Timeframe{Period: db.PeriodAllTime}})
+	require.NoError(t, err)
+	require.Len(t, listens.Items, 2)
+	assert.ElementsMatch(t, []int64{1749780612, 1749780613}, []int64{
+		listens.Items[0].Time.Unix(),
+		listens.Items[1].Time.Unix(),
+	})
 }
 
 func TestImportListenBrainz_MBIDMapping(t *testing.T) {
